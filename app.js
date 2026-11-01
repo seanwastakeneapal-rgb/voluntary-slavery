@@ -205,9 +205,10 @@
     const signup = state.authMode === 'signup';
     return `<div class="wrap auth">
       <div class="auth-hero">
-        <div class="wordmark"><span class="mark">✓</span>Voluntary Slavery</div>
-        <h1>Say it. Do it. <em>Get rated.</em></h1>
-        <p>Your tasks, your goals, and a crew of friends who decide what they're worth.</p>
+        <span class="mark big" aria-hidden="true">✓</span>
+        <h1>Voluntary <em>Slavery</em></h1>
+        <div class="tagline">Ultimate Slavery App</div>
+        <p>This is not an accountability app... this is slavery... therefore you <strong>MUST</strong> do it.</p>
       </div>
       <form class="card" id="auth-form">
         <label class="field"><span>Email</span><input id="auth-email" type="email" autocomplete="email" required></label>

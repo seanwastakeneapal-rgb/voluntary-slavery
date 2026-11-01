@@ -462,10 +462,36 @@ details.more[open] > summary { margin-bottom: 8px; }
 
 /* ---------- auth ---------- */
 .auth { max-width: 420px; margin: 0 auto; padding-block: 12vh 40px; display: grid; gap: 22px; }
-.auth-hero { display: grid; gap: 10px; }
-.auth-hero h1 { font-size: clamp(2.2rem, 9vw, 3.2rem); font-weight: 800; letter-spacing: -0.035em; }
-.auth-hero h1 em { font-style: normal; color: var(--accent); }
-.auth-hero p { color: var(--muted); margin: 0; font-size: var(--step-1); }
+.auth-hero { display: grid; gap: 12px; justify-items: start; }
+.auth-hero .mark.big {
+  width: 52px; height: 52px; border-radius: 14px;
+  background: var(--accent); color: var(--accent-ink);
+  display: grid; place-items: center;
+  font-size: 28px; font-weight: 800;
+  transform: rotate(-6deg);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.auth-hero h1 {
+  font-size: clamp(3rem, 15vw, 5rem);
+  font-weight: 800;
+  letter-spacing: -0.045em;
+  line-height: 0.9;
+  text-transform: uppercase;
+}
+.auth-hero h1 em { font-style: normal; color: var(--accent); display: block; }
+.auth-hero .tagline {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--gold);
+  color: var(--gold-ink);
+  font-weight: 800;
+  font-size: var(--step--1);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.auth-hero p { color: var(--muted); margin: 0; font-size: var(--step-1); max-width: 34ch; }
+.auth-hero p strong { color: var(--danger); font-weight: 800; }
 .auth form { padding: 18px; display: grid; gap: 12px; }
 .auth .switch { text-align: center; color: var(--muted); font-size: var(--step--1); }
 .rules { display: grid; gap: 6px; color: var(--muted); font-size: var(--step--1); padding: 0; margin: 0; list-style: none; }
