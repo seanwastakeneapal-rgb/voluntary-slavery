@@ -517,3 +517,76 @@ details.more[open] > summary { margin-bottom: 8px; }
 @media (min-width: 560px) {
   .stat b { font-size: 2.6rem; }
 }
+
+/* ---------- update 2: pipeline, measurable goals, chud profiles ---------- */
+.ink { color: var(--ink); }
+.muted { color: var(--muted); }
+.chip.stage { background: color-mix(in srgb, var(--gold) 22%, var(--surface)); color: var(--ink); border-color: transparent; }
+.chip.good { background: color-mix(in srgb, var(--good) 16%, var(--surface)); color: var(--good); border-color: transparent; }
+
+.mission { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.mission-text { font-family: var(--font-display); font-weight: 600; font-size: var(--step-1); line-height: 1.3; flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.mission-text.muted { font-family: var(--font-body); font-weight: 500; font-size: var(--step-0); }
+
+.pipeline { padding: 14px; display: grid; gap: 12px; }
+.pipeline-empty { display: grid; gap: 12px; text-align: center; }
+.pipeline-empty .hint { font-size: var(--step--1); }
+.flow { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 4px; align-items: stretch; }
+.flow li { display: flex; align-items: center; gap: 4px; }
+.flow li + li::before { content: "›"; color: var(--muted); font-weight: 700; padding: 0 2px; }
+.stage {
+  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 7px 12px 7px 7px;
+  border-radius: 999px;
+  border: 1.5px solid var(--line);
+  background: var(--surface-2);
+  font-weight: 600; font-size: var(--step--1);
+  text-align: left;
+}
+button.stage:hover { border-color: var(--accent); }
+.stage-n {
+  width: 22px; height: 22px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--surface); border: 1px solid var(--line);
+  font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums;
+}
+.stage small { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; }
+.stage.is-focus { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 40%, transparent); }
+.stage.is-focus .stage-n { background: var(--accent-ink); color: var(--accent); border-color: transparent; }
+.stage.is-done { background: color-mix(in srgb, var(--good) 14%, var(--surface)); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
+.stage.is-done small { color: var(--good); }
+.stage.editing { outline: 3px solid var(--gold); outline-offset: 2px; }
+.stage-editor { display: grid; gap: 10px; padding: 12px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--line); }
+.stage-editor .row { align-items: center; }
+
+.goal-head { flex: 1; min-width: 0; display: grid; gap: 6px; }
+.goal-nums { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.goal-nums b { font-family: var(--font-display); font-weight: 800; font-size: var(--step-3); letter-spacing: -0.03em; line-height: 1; }
+.goal-nums span { color: var(--muted); font-weight: 600; }
+.log-form { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px; border-radius: var(--radius-sm); background: var(--gold-soft); }
+.log-form input[type="number"] { flex: 0 1 120px; min-height: 36px; padding: 6px 10px; }
+.log-form input[type="text"] { flex: 1 1 160px; min-height: 36px; padding: 6px 10px; }
+.logs { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: var(--step--1); }
+.logs li { display: flex; align-items: center; gap: 8px; min-height: 30px; }
+.logs .log-note { color: var(--muted); flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.logs .meta { margin-left: auto; }
+.x-btn.sm { width: 24px; height: 24px; font-size: 12px; }
+.goal .list.steps .task { padding: 8px 0; }
+
+.person-row {
+  width: 100%; border: 0; background: none; text-align: left;
+  display: flex; gap: 12px; align-items: center;
+  padding: 12px 14px;
+}
+.person-row:hover { background: var(--surface-2); }
+.list.card > li:first-child .person-row { border-radius: var(--radius) var(--radius) 0 0; }
+.list.card > li:last-child .person-row { border-radius: 0 0 var(--radius) var(--radius); }
+.chev { font-size: 22px; color: var(--muted); flex: none; }
+
+.profile-head {
+  display: flex; gap: 14px; align-items: center; padding: 16px;
+  background: linear-gradient(120deg, color-mix(in srgb, var(--c) 18%, var(--surface)), var(--surface) 70%);
+}
+.profile-head h2 { font-size: var(--step-2); font-weight: 800; }
+
+.dot.goal-dot { border-radius: 2px; transform: rotate(45deg); }

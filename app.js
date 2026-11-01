@@ -16,9 +16,11 @@
   const EMOJIS = ['😎', '🦁', '🐺', '🦊', '🐼', '🐸', '🦄', '🐙', '🔥', '⚡', '🚀', '🌱', '🏀', '🎸', '🧠', '👑'];
   const COLORS = ['#3355ff', '#ff4f7b', '#12a67a', '#ff8a1f', '#8b5cf6', '#0ea5c6', '#d9a400', '#e8590c'];
   const CHEERS = ['🔥', '👏', '💪'];
+  const DEFAULT_STAGES = ['Attention', 'Interest', 'Conversation', 'Client', 'Loyal client', 'Referring client'];
+  const PREFIX_UNITS = ['$', '£', '€', 'B$', 'S$', 'RM'];
   const TABS = [
     { id: 'me', label: 'Me', icon: '✅' },
-    { id: 'crew', label: 'Crew', icon: '👥' },
+    { id: 'chuds', label: 'Chuds', icon: '🤝' },
     { id: 'calendar', label: 'Calendar', icon: '📅' },
     { id: 'board', label: 'Board', icon: '🏆' },
   ];
@@ -33,8 +35,12 @@
     donations: [],
     reactions: [],
     board: [],
+    stages: [],
+    logs: [],
+    needsMigration: false,
     loaded: false,
     tab: 'me',
+    viewing: null, // profile id open on the Chuds tab
     authMode: 'signin',
     sheet: null, // 'inbox' | 'profile'
     draftProfile: null,
@@ -44,6 +50,7 @@
     calFilter: 'all',
     openDonate: null, // key of the open "give points" box
     confirmDelete: null,
+    editStage: null,
   };
 
   // ---------- helpers ----------
@@ -58,11 +65,12 @@
   function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
   function daysUntil(s) { return Math.round((parseDay(s) - parseDay(todayStr())) / 86400000); }
   function localDayOf(ts) { return dateKey(new Date(ts)); }
+  function niceDay(s, opts = { weekday: 'short', day: 'numeric', month: 'short' }) { return parseDay(s).toLocaleDateString(undefined, opts); }
 
   function dueChip(task) {
     if (!task.due_date) return '';
     const d = daysUntil(task.due_date);
-    const nice = parseDay(task.due_date).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+    const nice = niceDay(task.due_date);
     if (task.status === 'done') return `<span class="chip">Due ${nice}</span>`;
     if (d < 0) return `<span class="chip overdue">Overdue ${-d}d</span>`;
     if (d === 0) return `<span class="chip today">Due today</span>`;
@@ -79,12 +87,19 @@
     return new Date(ts).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
   }
 
+  function fmtNum(n) { return Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
+  function fmtAmount(n, unit) {
+    if (!unit) return fmtNum(n);
+    return PREFIX_UNITS.includes(unit.trim()) ? `${unit.trim()}${fmtNum(n)}` : `${fmtNum(n)} ${unit}`;
+  }
+
   function person(id) { return state.profiles[id] || { display_name: 'Someone', emoji: '🙂', color: '#888' }; }
   function av(id, size = '') {
     const p = person(id);
     return `<span class="av ${size}" style="--c:${esc(p.color)}" title="${esc(p.display_name)}">${esc(p.emoji)}</span>`;
   }
   function isMe(id) { return state.me && id === state.me.id; }
+  function nameOf(id) { return isMe(id) ? 'You' : esc(person(id).display_name); }
 
   // Same rule as the task_scores view: 1 point until friends vote, then their rounded average.
   function taskScore(taskId) {
@@ -105,6 +120,30 @@
 
   function boardRow(id) { return state.board.find((b) => b.id === id) || { total: 0, week: 0, tasks_done: 0, tasks_week: 0 }; }
   function goalOf(id) { return state.goals.find((g) => g.id === id); }
+  function stageOf(id) { return state.stages.find((s) => s.id === id); }
+  function stagesOf(uid) { return state.stages.filter((s) => s.owner_id === uid).sort((a, b) => a.position - b.position); }
+  function focusOf(uid) { return state.stages.find((s) => s.owner_id === uid && s.status === 'focus'); }
+  function stageChip(id) { const s = id && stageOf(id); return s ? `<span class="chip stage">${esc(s.name)}</span>` : ''; }
+
+  function goalCurrent(g) { return state.logs.filter((l) => l.goal_id === g.id).reduce((a, l) => a + Number(l.amount), 0); }
+
+  // Compares progress so far with where you'd be if you went at a steady pace from start to deadline.
+  function pace(g, cur) {
+    const target = Number(g.metric_target);
+    if (cur >= target) return { label: 'Hit 🎯', cls: 'good' };
+    if (!g.target_date) return null;
+    const left = daysUntil(g.target_date);
+    if (left < 0) return { label: 'Missed', cls: 'overdue' };
+    const start = parseDay(g.start_date || localDayOf(g.created_at));
+    const total = Math.max(1, (parseDay(g.target_date) - start) / 86400000 + 1);
+    const elapsed = Math.min(total, Math.max(0, (parseDay(todayStr()) - start) / 86400000 + 1));
+    const expected = (target * elapsed) / total;
+    const perDay = (target - cur) / (left + 1);
+    const need = `Need ${fmtAmount(Math.ceil(perDay * 10) / 10, g.metric_unit)}/day`;
+    if (cur >= expected) return { label: 'On track', cls: 'good', need };
+    if (cur >= expected * 0.7) return { label: 'Slightly behind', cls: 'today', need };
+    return { label: 'Behind', cls: 'overdue', need };
+  }
 
   let toastTimer;
   function toast(msg, isErr = false) {
@@ -134,10 +173,20 @@
     ]);
     const bad = res.find((r) => r.error);
     if (bad) return fail(bad.error);
+    // Pipelines and goal logs come from update 002; the app still works without them.
+    const [st, lg] = await Promise.all([
+      sb.from('pipeline_stages').select('*').order('position'),
+      sb.from('goal_logs').select('*').order('created_at', { ascending: false }),
+    ]);
+    state.needsMigration = Boolean(st.error || lg.error);
+
     const [p, g, t, v, d, r, b] = res.map((x) => x.data);
     state.profiles = Object.fromEntries(p.map((x) => [x.id, x]));
     state.me = state.profiles[state.session.user.id] || null;
-    Object.assign(state, { goals: g, tasks: t, votes: v, donations: d, reactions: r, board: b, loaded: true });
+    Object.assign(state, {
+      goals: g, tasks: t, votes: v, donations: d, reactions: r, board: b,
+      stages: st.data || [], logs: lg.data || [], loaded: true,
+    });
     render();
   }
 
@@ -147,7 +196,7 @@
   let channel;
   function subscribe() {
     if (channel) return;
-    channel = sb.channel('crew')
+    channel = sb.channel('chuds')
       .on('postgres_changes', { event: '*', schema: 'public' }, scheduleReload)
       .subscribe();
   }
@@ -178,11 +227,11 @@
 
   function view() {
     if (!state.session) return authView();
-    if (!state.loaded) return `<p class="boot">Loading your crew…</p>`;
+    if (!state.loaded) return `<p class="boot">Loading the chuds…</p>`;
     if (!state.me) return `<p class="boot">Setting up your profile… reload in a sec.</p>`;
     if (!state.me.onboarded) return `<div class="wrap auth">${profileForm(true)}</div>`;
 
-    const body = { me: meView, crew: crewView, calendar: calendarView, board: boardView }[state.tab]();
+    const body = { me: meView, chuds: chudsView, calendar: calendarView, board: boardView }[state.tab]();
     return `
       <header class="topbar"><div class="wrap">
         <div class="wordmark"><span class="mark">✓</span>Voluntary Slavery</div>
@@ -190,7 +239,10 @@
         <button class="icon-btn" data-action="open-inbox" aria-label="Inbox">🔔${unseenCount() ? `<span class="badge">${unseenCount()}</span>` : ''}</button>
         <button class="icon-btn" data-action="open-profile" aria-label="Your profile" style="border:0;background:none">${av(state.me.id)}</button>
       </div></header>
-      <main class="wrap main">${body}</main>
+      <main class="wrap main">
+        ${state.needsMigration ? `<div class="empty" style="border-color:var(--warn);color:var(--warn)">Database update needed: run <b>supabase/002_pipeline_goals.sql</b> in the Supabase SQL Editor to turn on pipelines and goal tracking.</div>` : ''}
+        ${body}
+      </main>
       <nav class="tabbar" aria-label="Sections"><div class="wrap">
         ${TABS.map((t) => `<button class="tab" data-action="tab" data-tab="${t.id}" ${state.tab === t.id ? 'aria-current="page"' : ''}>
           <span class="ti">${t.icon}</span>${t.label}</button>`).join('')}
@@ -214,13 +266,13 @@
         <label class="field"><span>Email</span><input id="auth-email" type="email" autocomplete="email" required></label>
         <label class="field"><span>Password</span><input id="auth-pass" type="password" minlength="6" autocomplete="${signup ? 'new-password' : 'current-password'}" required></label>
         <button class="btn" type="submit">${signup ? 'Create account' : 'Sign in'}</button>
-        <div class="switch">${signup ? 'Already in the crew?' : 'New here?'}
+        <div class="switch">${signup ? 'Already a chud?' : 'New here?'}
           <button type="button" class="link-btn" data-action="auth-mode">${signup ? 'Sign in' : 'Create an account'}</button></div>
       </form>
       <ul class="rules">
         <li><span class="pts">1</span> for every task you finish</li>
-        <li><span class="pts">1-5</span> friends vote on what it was really worth</li>
-        <li><span class="pts">+</span> friends can give you some of their own points</li>
+        <li><span class="pts">1-5</span> the chuds vote on what it was really worth</li>
+        <li><span class="pts">+</span> chuds can give you some of their own points</li>
       </ul>
     </div>`;
   }
@@ -228,15 +280,17 @@
   // ----- profile -----
 
   function profileForm(first) {
-    const d = state.draftProfile || (state.draftProfile = { display_name: state.me.display_name, emoji: state.me.emoji, color: state.me.color });
+    const d = state.draftProfile || (state.draftProfile = { display_name: state.me.display_name, emoji: state.me.emoji, color: state.me.color, mission: state.me.mission || '' });
     return `<form class="${first ? 'card' : ''}" id="profile-form" style="display:grid;gap:16px;${first ? 'padding:18px' : ''}">
-      <div class="sheet-head"><h2>${first ? 'Set up your player' : 'Your profile'}</h2>
+      <div class="sheet-head"><h2>${first ? 'Set up your profile' : 'Your profile'}</h2>
         ${first ? '' : '<button type="button" class="x-btn" data-action="close-sheet" aria-label="Close">✕</button>'}</div>
       <div style="display:flex;gap:12px;align-items:center">
         <span class="av lg" style="--c:${esc(d.color)}">${esc(d.emoji)}</span>
-        <label class="field" style="flex:1"><span>Name your friends will see</span>
+        <label class="field" style="flex:1"><span>Name the chuds will see</span>
           <input id="pf-name" type="text" maxlength="30" required value="${esc(d.display_name)}"></label>
       </div>
+      <label class="field"><span>What are you working on right now?</span>
+        <input id="pf-mission" type="text" maxlength="200" placeholder="e.g. Building a server to nurture clients" value="${esc(d.mission)}"></label>
       <div class="field"><span>Pick an emoji</span><div class="emoji-grid">
         ${EMOJIS.map((e) => `<button type="button" data-action="pick-emoji" data-emoji="${e}" aria-pressed="${d.emoji === e}">${e}</button>`).join('')}
       </div></div>
@@ -258,50 +312,85 @@
     const done = mine.filter((t) => t.status === 'done').sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at)).slice(0, 6);
     const goals = state.goals.filter((g) => g.owner_id === me).sort((a, b) => a.done - b.done);
     const myGoals = goals.filter((g) => !g.done);
+    const myStages = stagesOf(me);
     const streak = streakFor(me);
 
     return `
+      <section class="mission">
+        <span class="label">Working on</span>
+        ${state.me.mission
+          ? `<div class="mission-text">${esc(state.me.mission)}</div>`
+          : `<div class="mission-text muted">Nothing set yet.</div>`}
+        <button class="link-btn" data-action="open-profile">${state.me.mission ? 'Edit' : 'Add what you’re working on'}</button>
+      </section>
+
       <section class="card stats">
         <div class="stat points"><span class="label">Points</span><b>${row.total}</b></div>
         <div class="stat"><span class="label">Streak</span><b>${streak}</b><span class="label" style="letter-spacing:0;text-transform:none">${streak === 1 ? 'day' : 'days'}${streak ? ' 🔥' : ''}</span></div>
         <div class="stat"><span class="label">Done this week</span><b>${row.tasks_week}</b></div>
       </section>
 
-      <form class="card add-form" id="task-form">
-        <input id="t-title" class="title-input" type="text" maxlength="160" placeholder="What are you getting done?" required aria-label="Task">
-        <div class="row">
-          <label class="field grow"><span>Due date</span><input id="t-due" type="date"></label>
-          <label class="field grow"><span>Part of a goal</span><select id="t-goal">
-            <option value="">No goal</option>
-            ${myGoals.map((g) => `<option value="${g.id}">${esc(g.title)}</option>`).join('')}
-          </select></label>
-        </div>
-        <details class="more"><summary>+ Add notes</summary><textarea id="t-notes" maxlength="500" placeholder="Details, links, why it matters"></textarea></details>
-        <button class="btn" type="submit">Add task</button>
-      </form>
+      ${state.needsMigration ? '' : `<section class="section">
+        <div class="section-head"><h2>My pipeline</h2><span class="hint">Fix one stage at a time</span></div>
+        ${pipelineView(me, true)}
+      </section>`}
+
+      <section class="section">
+        <div class="section-head"><h2>Goals</h2><span class="hint">Pipeline or personal</span></div>
+        <div class="goals">${goals.map((g) => goalCard(g)).join('')}</div>
+        ${goalForm(myStages)}
+      </section>
 
       <section class="section">
         <div class="section-head"><h2>To do</h2><span class="hint">${open.length} open</span></div>
-        ${open.length ? `<ul class="list card">${open.map(taskRow).join('')}</ul>`
-          : `<div class="empty">Nothing loose on your list. Add a task above, or add one to a goal below.</div>`}
-      </section>
-
-      <section class="section">
-        <div class="section-head"><h2>Goals</h2><span class="hint">Big things, broken into tasks</span></div>
-        <div class="goals">${goals.map(goalCard).join('')}</div>
-        <form class="card add-form" id="goal-form">
+        <form class="card add-form" id="task-form">
+          <input id="t-title" class="title-input" type="text" maxlength="160" placeholder="What are you getting done?" required aria-label="Task">
           <div class="row">
-            <label class="field grow"><span>New goal</span><input id="g-title" type="text" maxlength="120" placeholder="e.g. Run a 10k" required></label>
-            <label class="field grow"><span>Target date</span><input id="g-date" type="date"></label>
+            <label class="field grow"><span>Due date</span><input id="t-due" type="date"></label>
+            <label class="field grow"><span>Part of a goal</span><select id="t-goal">
+              <option value="">No goal</option>
+              ${myGoals.map((g) => `<option value="${g.id}">${esc(g.title)}</option>`).join('')}
+            </select></label>
+            ${myStages.length ? `<label class="field grow"><span>Pipeline stage</span><select id="t-stage">
+              <option value="">None</option>
+              ${myStages.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}
+            </select></label>` : ''}
           </div>
-          <button class="btn ghost" type="submit">Add goal</button>
+          <details class="more"><summary>+ Add notes</summary><textarea id="t-notes" maxlength="500" placeholder="Details, links, why it matters"></textarea></details>
+          <button class="btn" type="submit">Add task</button>
         </form>
+        ${open.length ? `<ul class="list card">${open.map((t) => taskRow(t)).join('')}</ul>`
+          : `<div class="empty">Nothing loose on your list. Add a task above, or add steps to a goal.</div>`}
       </section>
 
       ${done.length ? `<section class="section">
-        <div class="section-head"><h2>Recently done</h2><span class="hint">Friends are rating these</span></div>
-        <ul class="list card">${done.map(taskRow).join('')}</ul>
+        <div class="section-head"><h2>Recently done</h2><span class="hint">The chuds are rating these</span></div>
+        <ul class="list card">${done.map((t) => taskRow(t)).join('')}</ul>
       </section>` : ''}`;
+  }
+
+  function goalForm(myStages) {
+    return `<form class="card add-form" id="goal-form">
+      <div class="label">New goal</div>
+      <label class="field"><span>What do you want to achieve?</span>
+        <input id="g-title" type="text" maxlength="120" placeholder="e.g. Send cold outreaches" required></label>
+      <div class="row">
+        <label class="field grow"><span>How many?</span><input id="g-target" type="number" min="0.01" step="any" placeholder="100" required></label>
+        <label class="field grow"><span>Of what?</span><input id="g-unit" type="text" maxlength="30" placeholder="outreaches, calls, $" required></label>
+      </div>
+      <div class="row">
+        <label class="field grow"><span>Starting</span><input id="g-start" type="date" value="${todayStr()}" required></label>
+        <label class="field grow"><span>By when?</span><input id="g-date" type="date" required></label>
+      </div>
+      <div class="row">
+        <label class="field grow"><span>Type</span><select id="g-stage">
+          <option value="">Personal goal</option>
+          ${myStages.map((s) => `<option value="${s.id}">Pipeline: ${esc(s.name)}</option>`).join('')}
+        </select></label>
+        <label class="field grow"><span>Why it matters (optional)</span><input id="g-why" type="text" maxlength="200" placeholder="e.g. More calls = more clients"></label>
+      </div>
+      <button class="btn ghost" type="submit">Add goal</button>
+    </form>`;
   }
 
   function byDue(a, b) {
@@ -320,105 +409,286 @@
 
   function taskRow(t, opts = {}) {
     const done = t.status === 'done';
+    const own = isMe(t.owner_id);
     const goal = !opts.inGoal && t.goal_id && goalOf(t.goal_id);
     const nudges = state.reactions.filter((r) => r.task_id === t.id && r.kind === 'nudge').length;
     const cheers = reactionSummary(t.id, 'cheer');
     const sc = done ? taskScore(t.id) : null;
     const confirming = state.confirmDelete === t.id;
     return `<li class="task ${done ? 'is-done' : ''}">
-      <button class="check ${done ? 'done' : ''}" data-action="toggle-task" data-id="${t.id}" aria-label="${done ? 'Mark not done' : 'Mark done'}">✓</button>
+      ${own
+        ? `<button class="check ${done ? 'done' : ''}" data-action="toggle-task" data-id="${t.id}" aria-label="${done ? 'Mark not done' : 'Mark done'}">✓</button>`
+        : `<span class="check ${done ? 'done' : ''}" aria-hidden="true">✓</span>`}
       <div class="task-body">
         <div class="task-title">${esc(t.title)}</div>
         ${t.notes ? `<div class="task-notes">${esc(t.notes)}</div>` : ''}
         <div class="meta">
           ${done ? `<span class="pts">${sc.score}</span><span>${sc.count ? `${sc.count} vote${sc.count > 1 ? 's' : ''}` : 'waiting for votes'}</span>` : dueChip(t)}
           ${goal ? `<span class="chip goal">${esc(goal.title)}</span>` : ''}
+          ${stageChip(t.stage_id)}
           ${cheers ? `<span>${cheers}</span>` : ''}
           ${!done && nudges ? `<span class="chip overdue">👉 ${nudges} nudge${nudges > 1 ? 's' : ''}</span>` : ''}
         </div>
       </div>
-      <div class="task-actions">
+      ${own ? `<div class="task-actions">
         ${confirming
           ? `<button class="btn danger sm" data-action="delete-task" data-id="${t.id}">Delete</button>`
           : `<button class="x-btn" data-action="ask-delete" data-id="${t.id}" aria-label="Delete task">✕</button>`}
-      </div>
+      </div>` : (!done && t.due_date && daysUntil(t.due_date) <= 0 ? nudgeBtn(t) : '')}
     </li>`;
   }
 
-  function goalProgress(g) {
-    const ts = state.tasks.filter((t) => t.goal_id === g.id);
-    const done = ts.filter((t) => t.status === 'done').length;
-    return { ts, done, total: ts.length, pct: ts.length ? Math.round((done / ts.length) * 100) : 0 };
+  // ----- pipeline -----
+
+  function pipelineView(uid, editable) {
+    const stages = stagesOf(uid);
+    if (!stages.length) {
+      if (!editable) return '';
+      return `<div class="empty pipeline-empty">
+        <div>Map how someone goes from stranger to client, then fix one stage at a time.</div>
+        <div class="row" style="justify-content:center">
+          <button class="btn sm" data-action="seed-pipeline">Use the 6-stage pipeline</button>
+        </div>
+        <div class="hint">Attention › Interest › Conversation › Client › Loyal client › Referring client. You can rename, add or remove stages after.</div>
+        ${addStageForm()}
+      </div>`;
+    }
+    const focus = stages.find((s) => s.status === 'focus');
+    const doneCount = stages.filter((s) => s.status === 'done').length;
+    const editing = editable && state.editStage && stageOf(state.editStage);
+
+    const flow = stages.map((s, i) => {
+      const tag = s.status === 'focus' ? '<small>Focus</small>' : s.status === 'done' ? '<small>✓ Optimised</small>' : '';
+      const inner = `<span class="stage-n">${i + 1}</span><span class="stage-name">${esc(s.name)}</span>${tag}`;
+      return `<li>${editable
+        ? `<button class="stage is-${s.status} ${state.editStage === s.id ? 'editing' : ''}" data-action="edit-stage" data-id="${s.id}">${inner}</button>`
+        : `<div class="stage is-${s.status}">${inner}</div>`}</li>`;
+    }).join('');
+
+    const focusGoals = focus ? state.goals.filter((g) => g.stage_id === focus.id && !g.done).length : 0;
+    return `<div class="card pipeline">
+      <ol class="flow">${flow}</ol>
+      <div class="meta">
+        ${focus ? `<span>Focusing on <b class="ink">${esc(focus.name)}</b>${focusGoals ? ` · ${focusGoals} goal${focusGoals > 1 ? 's' : ''}` : ''}</span>` : '<span>No focus stage picked yet.</span>'}
+        <span class="num">${doneCount}/${stages.length} optimised</span>
+        ${editable && !editing ? '<span class="hint">Tap a stage to change it</span>' : ''}
+      </div>
+      ${editing ? stageEditor(editing, stages) : ''}
+      ${editable && !editing ? addStageForm() : ''}
+    </div>`;
   }
 
-  function goalCard(g) {
-    const { ts, done, total, pct } = goalProgress(g);
+  function addStageForm() {
+    return `<form class="mini-add" id="stage-add-form">
+      <input id="st-new" type="text" maxlength="40" placeholder="Add a stage" required aria-label="New stage name">
+      <button class="btn sm ghost" type="submit">Add</button>
+    </form>`;
+  }
+
+  function stageEditor(s, stages) {
+    const i = stages.indexOf(s);
+    const confirming = state.confirmDelete === s.id;
+    return `<form class="stage-editor" id="stage-form" data-id="${s.id}">
+      <div class="mini-add">
+        <input id="st-name-${s.id}" type="text" maxlength="40" value="${esc(s.name)}" required aria-label="Stage name">
+        <button class="btn sm" type="submit">Rename</button>
+      </div>
+      <div class="row">
+        ${s.status !== 'focus' ? `<button type="button" class="btn sm" data-action="stage-focus" data-id="${s.id}">Make this my focus</button>` : ''}
+        <button type="button" class="btn sm ghost" data-action="stage-done" data-id="${s.id}">${s.status === 'done' ? 'Not optimised yet' : 'Mark optimised ✓'}</button>
+        <button type="button" class="btn sm ghost" data-action="stage-move" data-id="${s.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move earlier">‹</button>
+        <button type="button" class="btn sm ghost" data-action="stage-move" data-id="${s.id}" data-dir="1" ${i === stages.length - 1 ? 'disabled' : ''} aria-label="Move later">›</button>
+        ${confirming
+          ? `<button type="button" class="btn sm danger" data-action="stage-delete" data-id="${s.id}">Delete stage</button>`
+          : `<button type="button" class="btn sm ghost" data-action="ask-delete" data-id="${s.id}">Delete</button>`}
+        <button type="button" class="link-btn" data-action="stage-close">Done</button>
+      </div>
+    </form>`;
+  }
+
+  // ----- goals -----
+
+  function goalCard(g, opts = {}) {
+    const own = isMe(g.owner_id) && !opts.readOnly;
+    const ts = state.tasks.filter((t) => t.goal_id === g.id).sort(byDue);
+    const stepsDone = ts.filter((t) => t.status === 'done').length;
     const color = person(g.owner_id).color;
     const confirming = state.confirmDelete === g.id;
-    const target = g.target_date ? parseDay(g.target_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+    const measured = g.metric_target != null;
+    const cur = measured ? goalCurrent(g) : 0;
+    const pct = measured
+      ? Math.min(100, Math.round((cur / Number(g.metric_target)) * 100))
+      : (ts.length ? Math.round((stepsDone / ts.length) * 100) : 0);
+    const pc = measured && !g.done ? pace(g, cur) : null;
+    const left = g.target_date ? daysUntil(g.target_date) : null;
+    const logs = state.logs.filter((l) => l.goal_id === g.id).slice(0, 3);
+
     return `<article class="card goal ${g.done ? 'is-done' : ''}">
       <div class="goal-top">
-        <h3>${g.done ? '🏁 ' : ''}${esc(g.title)}</h3>
-        ${confirming
+        <div class="goal-head">
+          <div class="meta">${g.stage_id ? stageChip(g.stage_id) : '<span class="chip">Personal</span>'}${pc ? `<span class="chip ${pc.cls}">${pc.label}</span>` : ''}${g.done ? '<span class="chip good">Complete 🏁</span>' : ''}</div>
+          <h3>${esc(g.title)}</h3>
+        </div>
+        ${own ? (confirming
           ? `<button class="btn danger sm" data-action="delete-goal" data-id="${g.id}">Delete goal</button>`
-          : `<button class="x-btn" data-action="ask-delete" data-id="${g.id}" aria-label="Delete goal">✕</button>`}
+          : `<button class="x-btn" data-action="ask-delete" data-id="${g.id}" aria-label="Delete goal">✕</button>`) : ''}
       </div>
+      ${measured ? `<div class="goal-nums"><b class="num">${fmtAmount(cur, g.metric_unit)}</b><span>of ${fmtAmount(g.metric_target, g.metric_unit)}</span></div>` : ''}
       <div class="bar" style="--c:${esc(color)}"><i style="width:${g.done ? 100 : pct}%"></i></div>
-      <div class="meta"><span class="num">${done}/${total} tasks</span>${target ? `<span class="chip">Target ${target}</span>` : ''}</div>
-      ${ts.length ? `<ul class="list">${ts.sort(byDue).map((t) => taskRow(t, { inGoal: true })).join('')}</ul>` : ''}
-      ${g.done ? '' : `<form class="mini-add" data-goal="${g.id}">
+      <div class="meta">
+        ${g.target_date ? `<span>By ${niceDay(g.target_date, { day: 'numeric', month: 'short', year: 'numeric' })}</span>` : ''}
+        ${left != null && !g.done ? `<span>${left > 0 ? `${left} day${left > 1 ? 's' : ''} left` : left === 0 ? 'Deadline today' : `${-left}d past deadline`}</span>` : ''}
+        ${pc && pc.need ? `<span>${pc.need}</span>` : ''}
+        ${ts.length ? `<span class="num">${stepsDone}/${ts.length} steps</span>` : ''}
+      </div>
+      ${g.description ? `<div class="task-notes">Why: ${esc(g.description)}</div>` : ''}
+      ${own && measured && !g.done ? `<form class="log-form" data-goal="${g.id}">
+        <input id="lg-amt-${g.id}" type="number" step="any" placeholder="+ ${esc(g.metric_unit || 'amount')}" required aria-label="Amount to log">
+        <input id="lg-note-${g.id}" type="text" maxlength="140" placeholder="What did you do? (optional)" aria-label="Note">
+        <button class="btn sm gold" type="submit">Log</button>
+      </form>` : ''}
+      ${logs.length ? `<ul class="logs">${logs.map((l) => `<li>
+        <span class="num"><b>${Number(l.amount) > 0 ? '+' : ''}${fmtAmount(l.amount, g.metric_unit)}</b></span>
+        ${l.note ? `<span class="log-note">${esc(l.note)}</span>` : ''}
+        <span class="meta">${timeAgo(l.created_at)}</span>
+        ${own ? `<button class="x-btn sm" data-action="delete-log" data-id="${l.id}" aria-label="Remove this entry">✕</button>` : ''}
+      </li>`).join('')}</ul>` : ''}
+      ${ts.length ? `<ul class="list steps">${ts.map((t) => taskRow(t, { inGoal: true })).join('')}</ul>` : ''}
+      ${own && !g.done ? `<form class="mini-add" data-goal="${g.id}">
         <input id="gt-${g.id}" type="text" maxlength="160" placeholder="Add a step" required aria-label="Add a step to ${esc(g.title)}">
-        <button class="btn sm ghost" type="submit">Add</button></form>`}
-      <div><button class="link-btn" data-action="toggle-goal" data-id="${g.id}">${g.done ? 'Reopen goal' : 'Mark goal complete'}</button></div>
+        <button class="btn sm ghost" type="submit">Add</button></form>` : ''}
+      ${own ? `<div><button class="link-btn" data-action="toggle-goal" data-id="${g.id}">${g.done ? 'Reopen goal' : 'Mark goal complete'}</button></div>` : ''}
     </article>`;
   }
 
-  // ----- crew -----
+  // ----- chuds -----
 
-  function crewView() {
+  function chudsView() {
+    if (state.viewing && state.profiles[state.viewing]) return chudProfile(state.viewing);
     const me = state.me.id;
+    const people = Object.values(state.profiles).filter((p) => p.onboarded)
+      .sort((a, b) => (isMe(a.id) ? 1 : 0) - (isMe(b.id) ? 1 : 0) || a.display_name.localeCompare(b.display_name));
     const pushes = state.tasks
       .filter((t) => t.owner_id !== me && t.status === 'todo' && t.due_date && daysUntil(t.due_date) <= 0)
       .sort(byDue);
-    const feed = state.tasks
-      .filter((t) => t.status === 'done')
-      .sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at))
-      .slice(0, 40);
-    const friendGoals = state.goals.filter((g) => g.owner_id !== me && !g.done);
+
+    const activity = [
+      ...state.tasks.filter((t) => t.status === 'done').map((t) => ({ at: t.completed_at, html: () => feedItem(t) })),
+      ...state.logs.map((l) => ({ at: l.created_at, html: () => logItem(l) })),
+    ].sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 40);
 
     return `
+      <section class="section">
+        <div class="section-head"><h2>The Chuds</h2><span class="hint">Tap someone to see what they’re on</span></div>
+        <ul class="list card">${people.map((p) => {
+          const f = focusOf(p.id);
+          const active = state.goals.filter((g) => g.owner_id === p.id && !g.done);
+          const behind = active.filter((g) => g.metric_target != null && ['overdue'].includes((pace(g, goalCurrent(g)) || {}).cls)).length;
+          const overdue = state.tasks.filter((t) => t.owner_id === p.id && t.status === 'todo' && t.due_date && daysUntil(t.due_date) < 0).length;
+          return `<li><button class="person-row" data-action="view-chud" data-id="${p.id}">
+            ${av(p.id)}
+            <div class="task-body">
+              <div class="task-title">${isMe(p.id) ? `${esc(p.display_name)} (you)` : esc(p.display_name)}</div>
+              <div class="task-notes">${p.mission ? esc(p.mission) : 'Hasn’t said what they’re working on'}</div>
+              <div class="meta">
+                ${f ? `<span class="chip stage">Focus: ${esc(f.name)}</span>` : ''}
+                <span>${active.length} goal${active.length === 1 ? '' : 's'}</span>
+                ${behind ? `<span class="chip overdue">${behind} behind</span>` : ''}
+                ${overdue ? `<span class="chip overdue">${overdue} overdue</span>` : ''}
+              </div>
+            </div>
+            <span class="chev" aria-hidden="true">›</span>
+          </button></li>`;
+        }).join('')}</ul>
+      </section>
+
       ${pushes.length ? `<section class="section">
         <div class="section-head"><h2>Needs a push</h2><span class="hint">Due today or overdue</span></div>
         <ul class="list card">${pushes.map(pushRow).join('')}</ul>
       </section>` : ''}
 
       <section class="section">
-        <div class="section-head"><h2>Finished lately</h2><span class="hint">Vote on what it was worth</span></div>
-        ${feed.length ? feed.map(feedItem).join('')
-          : `<div class="empty">No finished tasks yet. The first one done sets the bar.</div>`}
+        <div class="section-head"><h2>Latest</h2><span class="hint">Rate finished tasks</span></div>
+        ${activity.length ? activity.map((a) => a.html()).join('')
+          : `<div class="empty">Nothing yet. The first one to log progress sets the bar.</div>`}
+      </section>`;
+  }
+
+  function chudProfile(id) {
+    const p = person(id);
+    const row = boardRow(id);
+    const streak = streakFor(id);
+    const goals = state.goals.filter((g) => g.owner_id === id);
+    const active = goals.filter((g) => !g.done);
+    const finished = goals.filter((g) => g.done);
+    const open = state.tasks.filter((t) => t.owner_id === id && t.status === 'todo' && !t.goal_id).sort(byDue);
+    const done = state.tasks.filter((t) => t.owner_id === id && t.status === 'done')
+      .sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at)).slice(0, 5);
+
+    return `
+      <div><button class="link-btn" data-action="back">‹ All chuds</button></div>
+      <section class="card profile-head" style="--c:${esc(p.color)}">
+        ${av(id, 'lg')}
+        <div class="task-body">
+          <h2>${esc(p.display_name)}${isMe(id) ? ' <span class="hint">(you)</span>' : ''}</h2>
+          <div class="task-notes">${p.mission ? `Working on: <b class="ink">${esc(p.mission)}</b>` : 'Hasn’t said what they’re working on'}</div>
+        </div>
+      </section>
+      <section class="card stats">
+        <div class="stat points"><span class="label">Points</span><b>${row.total}</b></div>
+        <div class="stat"><span class="label">Streak</span><b>${streak}</b><span class="label" style="letter-spacing:0;text-transform:none">${streak === 1 ? 'day' : 'days'}${streak ? ' 🔥' : ''}</span></div>
+        <div class="stat"><span class="label">Done this week</span><b>${row.tasks_week}</b></div>
       </section>
 
-      ${friendGoals.length ? `<section class="section">
-        <div class="section-head"><h2>Crew goals</h2></div>
-        <ul class="list card">${friendGoals.map((g) => {
-          const { done, total, pct } = goalProgress(g);
-          return `<li class="push-item">${av(g.owner_id)}<div class="task-body">
-            <div class="task-title">${esc(g.title)}</div>
-            <div class="bar" style="--c:${esc(person(g.owner_id).color)}"><i style="width:${pct}%"></i></div>
-            <div class="meta"><span>${esc(person(g.owner_id).display_name)}</span><span class="num">${done}/${total} tasks</span></div>
-          </div></li>`;
-        }).join('')}</ul>
+      ${stagesOf(id).length ? `<section class="section">
+        <div class="section-head"><h2>Pipeline</h2>${isMe(id) ? '<button class="link-btn" data-action="tab" data-tab="me">Edit on Me tab</button>' : ''}</div>
+        ${pipelineView(id, false)}
+      </section>` : ''}
+
+      <section class="section">
+        <div class="section-head"><h2>Goals</h2><span class="hint">${active.length} active${finished.length ? ` · ${finished.length} complete` : ''}</span></div>
+        ${active.length ? `<div class="goals">${active.map((g) => goalCard(g, { readOnly: true })).join('')}</div>`
+          : `<div class="empty">No active goals.${isMe(id) ? '' : ' Ask them what they’re aiming for.'}</div>`}
+      </section>
+
+      <section class="section">
+        <div class="section-head"><h2>To do</h2><span class="hint">${open.length} open</span></div>
+        ${open.length ? `<ul class="list card">${open.map((t) => taskRow(t)).join('')}</ul>` : `<div class="empty">No loose tasks.</div>`}
+      </section>
+
+      ${done.length ? `<section class="section">
+        <div class="section-head"><h2>Recently done</h2></div>
+        ${done.map(feedItem).join('')}
       </section>` : ''}`;
+  }
+
+  function nudgeBtn(t) {
+    const iNudged = state.reactions.some((r) => r.task_id === t.id && r.kind === 'nudge' && isMe(r.from_id) && localDayOf(r.created_at) === todayStr());
+    return `<button class="btn sm ${iNudged ? 'ghost' : ''}" data-action="nudge" data-id="${t.id}" ${iNudged ? 'disabled' : ''}>${iNudged ? 'Nudged' : '👉 Nudge'}</button>`;
   }
 
   function pushRow(t) {
     const nudges = state.reactions.filter((r) => r.task_id === t.id && r.kind === 'nudge');
-    const iNudged = nudges.some((r) => isMe(r.from_id) && localDayOf(r.created_at) === todayStr());
     return `<li class="push-item">${av(t.owner_id)}
       <div class="task-body"><div class="task-title">${esc(t.title)}</div>
         <div class="meta"><span>${esc(person(t.owner_id).display_name)}</span>${dueChip(t)}${nudges.length ? `<span>👉 ${nudges.length}</span>` : ''}</div></div>
-      <button class="btn sm ${iNudged ? 'ghost' : ''}" data-action="nudge" data-id="${t.id}" ${iNudged ? 'disabled' : ''}>${iNudged ? 'Nudged' : '👉 Nudge'}</button>
+      ${nudgeBtn(t)}
     </li>`;
+  }
+
+  function logItem(l) {
+    const g = goalOf(l.goal_id);
+    if (!g) return '';
+    const cur = goalCurrent(g);
+    const pct = Math.min(100, Math.round((cur / Number(g.metric_target)) * 100));
+    return `<article class="card feed-item log-item">
+      <div class="who">${av(l.owner_id)}
+        <div class="who-text"><div class="name">${nameOf(l.owner_id)} <span class="sub">logged</span> <b class="num">${Number(l.amount) > 0 ? '+' : ''}${fmtAmount(l.amount, g.metric_unit)}</b></div>
+          <div class="sub">${esc(g.title)} · ${timeAgo(l.created_at)}</div></div>
+        <span class="chip">${pct}%</span>
+      </div>
+      ${l.note ? `<div class="task-notes">“${esc(l.note)}”</div>` : ''}
+    </article>`;
   }
 
   function feedItem(t) {
@@ -444,12 +714,12 @@
 
     return `<article class="card feed-item">
       <div class="who">${av(t.owner_id)}
-        <div class="who-text"><div class="name">${mine ? 'You' : esc(person(t.owner_id).display_name)}</div>
+        <div class="who-text"><div class="name">${nameOf(t.owner_id)}</div>
           <div class="sub">finished ${timeAgo(t.completed_at)}</div></div>
         <span class="pts" title="${sc.count} vote${sc.count === 1 ? '' : 's'}">${sc.score}</span>
       </div>
       <div class="feed-title">${esc(t.title)}</div>
-      ${goal ? `<div class="meta"><span class="chip goal">${esc(goal.title)}</span></div>` : ''}
+      ${goal || t.stage_id ? `<div class="meta">${goal ? `<span class="chip goal">${esc(goal.title)}</span>` : ''}${stageChip(t.stage_id || (goal && goal.stage_id))}</div>` : ''}
       ${stars}
       <div class="react-row">${reacts}
         ${mine ? '' : `<button class="react" data-action="toggle-donate" data-key="${key}">🪙 Give points</button>`}
@@ -481,26 +751,29 @@
     const start = new Date(first); start.setDate(1 - offset);
     const daysInMonth = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
     const cells = Math.ceil((offset + daysInMonth) / 7) * 7;
+    const shown = (uid) => state.calFilter === 'all' || uid === state.calFilter;
 
-    const visible = state.tasks.filter((t) => t.due_date && (state.calFilter === 'all' || t.owner_id === state.calFilter));
     const byDay = {};
-    visible.forEach((t) => { (byDay[t.due_date] ||= []).push(t); });
+    state.tasks.filter((t) => t.due_date && shown(t.owner_id)).forEach((t) => { (byDay[t.due_date] ||= []).push({ kind: 'task', t }); });
+    state.goals.filter((g) => g.target_date && shown(g.owner_id)).forEach((g) => { (byDay[g.target_date] ||= []).push({ kind: 'goal', g }); });
 
     const today = todayStr();
     let grid = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => `<div class="cal-dow">${d}</div>`).join('');
     for (let i = 0; i < cells; i++) {
       const d = new Date(start); d.setDate(start.getDate() + i);
       const k = dateKey(d);
-      const ts = byDay[k] || [];
+      const items = byDay[k] || [];
       const cls = ['day', d.getMonth() !== m.getMonth() && 'out', k === today && 'today', k === state.calDay && 'sel'].filter(Boolean).join(' ');
-      grid += `<button class="${cls}" data-action="cal-day" data-day="${k}" aria-label="${d.toDateString()}, ${ts.length} task${ts.length === 1 ? '' : 's'}">
+      grid += `<button class="${cls}" data-action="cal-day" data-day="${k}" aria-label="${d.toDateString()}, ${items.length} item${items.length === 1 ? '' : 's'}">
         <span>${d.getDate()}</span>
-        <span class="dots">${ts.slice(0, 6).map((t) => `<i class="dot ${t.status === 'done' ? 'done' : ''}" style="--c:${esc(person(t.owner_id).color)}"></i>`).join('')}</span>
+        <span class="dots">${items.slice(0, 6).map((it) => it.kind === 'goal'
+          ? `<i class="dot goal-dot ${it.g.done ? 'done' : ''}" style="--c:${esc(person(it.g.owner_id).color)}"></i>`
+          : `<i class="dot ${it.t.status === 'done' ? 'done' : ''}" style="--c:${esc(person(it.t.owner_id).color)}"></i>`).join('')}</span>
       </button>`;
     }
 
-    const dayTasks = (byDay[state.calDay] || []).sort((a, b) => a.status.localeCompare(b.status) * -1);
-    const dayLabel = parseDay(state.calDay).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
+    const dayItems = byDay[state.calDay] || [];
+    const dayLabel = niceDay(state.calDay, { weekday: 'long', day: 'numeric', month: 'long' });
     const people = Object.values(state.profiles).filter((p) => p.onboarded);
 
     return `
@@ -516,14 +789,18 @@
           <button class="icon-btn" data-action="cal-move" data-dir="1" aria-label="Next month">›</button>
         </div>
         <div class="cal-grid">${grid}</div>
+        <div class="meta"><span><i class="dot" style="--c:var(--muted);display:inline-block"></i> task due</span><span><i class="dot goal-dot" style="--c:var(--muted);display:inline-block"></i> goal deadline</span></div>
       </section>
       <section class="section">
-        <div class="section-head"><h2>${dayLabel}</h2><span class="hint">${dayTasks.length} due</span></div>
-        ${dayTasks.length ? `<ul class="list card">${dayTasks.map((t) => `<li class="push-item">${av(t.owner_id)}
-          <div class="task-body"><div class="task-title" style="${t.status === 'done' ? 'text-decoration:line-through;color:var(--muted)' : ''}">${esc(t.title)}</div>
-          <div class="meta"><span>${isMe(t.owner_id) ? 'You' : esc(person(t.owner_id).display_name)}</span>${t.status === 'done' ? '<span class="chip">Done</span>' : dueChip(t)}</div></div>
-          ${isMe(t.owner_id) && t.status === 'todo' ? `<button class="check" data-action="toggle-task" data-id="${t.id}" aria-label="Mark done">✓</button>` : ''}
-        </li>`).join('')}</ul>` : `<div class="empty">Nothing due this day.</div>`}
+        <div class="section-head"><h2>${dayLabel}</h2><span class="hint">${dayItems.length} due</span></div>
+        ${dayItems.length ? `<ul class="list card">${dayItems.map((it) => it.kind === 'goal' ? `<li class="push-item">${av(it.g.owner_id)}
+            <div class="task-body"><div class="task-title">🎯 ${esc(it.g.title)}</div>
+            <div class="meta"><span>${nameOf(it.g.owner_id)}</span><span>Goal deadline</span>${it.g.metric_target != null ? `<span class="num">${fmtAmount(goalCurrent(it.g), it.g.metric_unit)} of ${fmtAmount(it.g.metric_target, it.g.metric_unit)}</span>` : ''}</div></div></li>`
+          : `<li class="push-item">${av(it.t.owner_id)}
+            <div class="task-body"><div class="task-title" style="${it.t.status === 'done' ? 'text-decoration:line-through;color:var(--muted)' : ''}">${esc(it.t.title)}</div>
+            <div class="meta"><span>${nameOf(it.t.owner_id)}</span>${it.t.status === 'done' ? '<span class="chip">Done</span>' : dueChip(it.t)}</div></div>
+            ${isMe(it.t.owner_id) && it.t.status === 'todo' ? `<button class="check" data-action="toggle-task" data-id="${it.t.id}" aria-label="Mark done">✓</button>` : ''}
+          </li>`).join('')}</ul>` : `<div class="empty">Nothing due this day.</div>`}
       </section>`;
   }
 
@@ -557,7 +834,7 @@
           ${state.openDonate === key ? donateBox(key, b.id, null) : ''}
         </li>`;
       }).join('')}</ul>
-      <p class="hint" style="color:var(--muted);font-size:var(--step--1);margin:0">Points = finished tasks (rated by friends) + points given to you − points you gave away.</p>
+      <p class="hint" style="color:var(--muted);font-size:var(--step--1);margin:0">Points = finished tasks (rated by the chuds) + points given to you − points you gave away.</p>
 
       ${gifts.length ? `<section class="section">
         <div class="section-head"><h2>Points given</h2></div>
@@ -595,7 +872,7 @@
       ${items.length ? `<div>${items.map((i) => `<div class="inbox-item ${new Date(i.at) > seen ? 'new' : ''}">${av(i.from, 'sm')}
         <div class="who-text"><div><span class="name">${esc(person(i.from).display_name)}</span> ${i.text}</div>
         <div class="sub">${timeAgo(i.at)}</div></div></div>`).join('')}</div>`
-        : `<div class="empty">Votes, cheers, nudges and points from friends land here.</div>`}
+        : `<div class="empty">Votes, cheers, nudges and points from the chuds land here.</div>`}
     </div></div>`;
   }
 
@@ -627,9 +904,19 @@
 
   // ---------- actions ----------
 
+  async function run(promise, okMsg) {
+    const { error } = await promise;
+    if (error) { fail(error); return false; }
+    if (okMsg) toast(okMsg);
+    loadAll();
+    return true;
+  }
+
   const actions = {
     'auth-mode'() { state.authMode = state.authMode === 'signin' ? 'signup' : 'signin'; render(); },
     tab(el) { location.hash = el.dataset.tab; },
+    'view-chud'(el) { location.hash = `chud-${el.dataset.id}`; },
+    back() { location.hash = 'chuds'; },
 
     'open-inbox'() {
       state.inboxSeenBefore = state.me.last_seen_inbox;
@@ -640,27 +927,18 @@
       sb.from('profiles').update({ last_seen_inbox: now }).eq('id', state.me.id).then(({ error }) => error && fail(error));
     },
     'open-profile'() {
-      state.draftProfile = { display_name: state.me.display_name, emoji: state.me.emoji, color: state.me.color };
+      state.draftProfile = { display_name: state.me.display_name, emoji: state.me.emoji, color: state.me.color, mission: state.me.mission || '' };
       state.sheet = 'profile'; render();
     },
     'close-sheet'() { state.sheet = null; state.inboxSeenBefore = null; render(); },
-    'pick-emoji'(el) { syncDraftName(); state.draftProfile.emoji = el.dataset.emoji; render(); },
-    'pick-color'(el) { syncDraftName(); state.draftProfile.color = el.dataset.color; render(); },
+    'pick-emoji'(el) { syncDraft(); state.draftProfile.emoji = el.dataset.emoji; render(); },
+    'pick-color'(el) { syncDraft(); state.draftProfile.color = el.dataset.color; render(); },
     async 'sign-out'() { await sb.auth.signOut(); },
 
     'ask-delete'(el) { state.confirmDelete = el.dataset.id; render(); },
-    async 'delete-task'(el) {
-      state.confirmDelete = null;
-      const { error } = await sb.from('tasks').delete().eq('id', el.dataset.id);
-      if (error) return fail(error);
-      toast('Task deleted'); loadAll();
-    },
-    async 'delete-goal'(el) {
-      state.confirmDelete = null;
-      const { error } = await sb.from('goals').delete().eq('id', el.dataset.id);
-      if (error) return fail(error);
-      toast('Goal deleted. Its tasks are still on your list.'); loadAll();
-    },
+    'delete-task'(el) { state.confirmDelete = null; run(sb.from('tasks').delete().eq('id', el.dataset.id), 'Task deleted'); },
+    'delete-goal'(el) { state.confirmDelete = null; run(sb.from('goals').delete().eq('id', el.dataset.id), 'Goal deleted. Its tasks are still on your list.'); },
+    'delete-log'(el) { run(sb.from('goal_logs').delete().eq('id', el.dataset.id), 'Entry removed'); },
 
     async 'toggle-task'(el) {
       const t = state.tasks.find((x) => x.id === el.dataset.id);
@@ -668,46 +946,72 @@
       const status = t.status === 'done' ? 'todo' : 'done';
       t.status = status; t.completed_at = status === 'done' ? new Date().toISOString() : null;
       render();
-      if (status === 'done') { confetti(); toast('Done. +1 point, now let the crew rate it.'); }
+      if (status === 'done') { confetti(); toast('Done. +1 point, now let the chuds rate it.'); }
       const { error } = await sb.from('tasks').update({ status }).eq('id', t.id);
       if (error) fail(error);
       loadAll();
     },
     async 'toggle-goal'(el) {
       const g = goalOf(el.dataset.id);
-      const { error } = await sb.from('goals').update({ done: !g.done }).eq('id', g.id);
-      if (error) return fail(error);
-      if (!g.done) { confetti(); toast('Goal complete. Massive.'); }
+      if (await run(sb.from('goals').update({ done: !g.done }).eq('id', g.id)) && !g.done) {
+        confetti(); toast('Goal complete. Massive.');
+      }
+    },
+
+    // Pipeline
+    'seed-pipeline'() {
+      const rows = DEFAULT_STAGES.map((name, i) => ({ name, position: i }));
+      run(sb.from('pipeline_stages').insert(rows), 'Pipeline added. Tap a stage to make it your focus.');
+    },
+    'edit-stage'(el) { state.editStage = state.editStage === el.dataset.id ? null : el.dataset.id; render(); },
+    'stage-close'() { state.editStage = null; render(); },
+    async 'stage-focus'(el) {
+      // Only one focus allowed, so clear the old one first.
+      const old = focusOf(state.me.id);
+      if (old) {
+        const { error } = await sb.from('pipeline_stages').update({ status: 'todo' }).eq('id', old.id);
+        if (error) return fail(error);
+      }
+      run(sb.from('pipeline_stages').update({ status: 'focus' }).eq('id', el.dataset.id), 'New focus set');
+    },
+    'stage-done'(el) {
+      const s = stageOf(el.dataset.id);
+      const status = s.status === 'done' ? 'todo' : 'done';
+      if (status === 'done') confetti();
+      run(sb.from('pipeline_stages').update({ status }).eq('id', s.id), status === 'done' ? `${s.name} optimised. On to the next one.` : null);
+    },
+    async 'stage-move'(el) {
+      const stages = stagesOf(state.me.id);
+      const i = stages.findIndex((s) => s.id === el.dataset.id);
+      const j = i + Number(el.dataset.dir);
+      if (j < 0 || j >= stages.length) return;
+      // Renumber everything so positions stay clean even if two were equal.
+      const order = stages.slice();
+      [order[i], order[j]] = [order[j], order[i]];
+      const results = await Promise.all(order.map((s, k) => sb.from('pipeline_stages').update({ position: k }).eq('id', s.id)));
+      const bad = results.find((r) => r.error);
+      if (bad) fail(bad.error);
       loadAll();
+    },
+    'stage-delete'(el) {
+      state.confirmDelete = null; state.editStage = null;
+      run(sb.from('pipeline_stages').delete().eq('id', el.dataset.id), 'Stage deleted');
     },
 
     async vote(el) {
       const task_id = el.dataset.id;
       const points = Number(el.dataset.points);
       const existing = state.votes.find((v) => v.task_id === task_id && isMe(v.voter_id));
-      let error;
-      if (existing && existing.points === points) {
-        ({ error } = await sb.from('task_votes').delete().eq('task_id', task_id).eq('voter_id', state.me.id));
-      } else {
-        ({ error } = await sb.from('task_votes').upsert({ task_id, voter_id: state.me.id, points }));
-      }
-      if (error) return fail(error);
-      loadAll();
+      run(existing && existing.points === points
+        ? sb.from('task_votes').delete().eq('task_id', task_id).eq('voter_id', state.me.id)
+        : sb.from('task_votes').upsert({ task_id, voter_id: state.me.id, points }));
     },
-    async cheer(el) {
+    cheer(el) {
       const task_id = el.dataset.id, emoji = el.dataset.emoji;
       const mine = state.reactions.find((r) => r.task_id === task_id && r.kind === 'cheer' && r.emoji === emoji && isMe(r.from_id));
-      const { error } = mine
-        ? await sb.from('reactions').delete().eq('id', mine.id)
-        : await sb.from('reactions').insert({ task_id, kind: 'cheer', emoji });
-      if (error) return fail(error);
-      loadAll();
+      run(mine ? sb.from('reactions').delete().eq('id', mine.id) : sb.from('reactions').insert({ task_id, kind: 'cheer', emoji }));
     },
-    async nudge(el) {
-      const { error } = await sb.from('reactions').insert({ task_id: el.dataset.id, kind: 'nudge', emoji: '👉' });
-      if (error) return fail(error);
-      toast('Nudge sent'); loadAll();
-    },
+    nudge(el) { run(sb.from('reactions').insert({ task_id: el.dataset.id, kind: 'nudge', emoji: '👉' }), 'Nudge sent'); },
     'toggle-donate'(el) { state.openDonate = state.openDonate === el.dataset.key ? null : el.dataset.key; render(); },
 
     'board-mode'(el) { state.boardMode = el.dataset.mode; render(); },
@@ -721,17 +1025,20 @@
     'cal-today'() { state.calMonth = startOfMonth(new Date()); state.calDay = todayStr(); render(); },
   };
 
-  function syncDraftName() {
-    const el = document.getElementById('pf-name');
-    if (el) state.draftProfile.display_name = el.value;
+  function syncDraft() {
+    const name = document.getElementById('pf-name');
+    const mission = document.getElementById('pf-mission');
+    if (name) state.draftProfile.display_name = name.value;
+    if (mission) state.draftProfile.mission = mission.value;
   }
 
+  const KEEP_CONFIRM = ['ask-delete', 'delete-task', 'delete-goal', 'stage-delete'];
   app.addEventListener('click', (e) => {
     const el = e.target.closest('[data-action]');
     if (!el) return;
     // Clicks inside a sheet shouldn't hit the scrim's close action.
     if (el.classList.contains('scrim') && e.target.closest('[data-stop]')) return;
-    if (el.dataset.action !== 'ask-delete' && el.dataset.action !== 'delete-task' && el.dataset.action !== 'delete-goal') state.confirmDelete = null;
+    if (!KEEP_CONFIRM.includes(el.dataset.action)) state.confirmDelete = null;
     const fn = actions[el.dataset.action];
     if (fn) { e.preventDefault(); fn(el); }
   });
@@ -746,6 +1053,9 @@
       else if (f.id === 'profile-form') await submitProfile();
       else if (f.id === 'task-form') await submitTask(f);
       else if (f.id === 'goal-form') await submitGoal(f);
+      else if (f.id === 'stage-add-form') await submitStage(f);
+      else if (f.id === 'stage-form') await submitStageRename(f);
+      else if (f.classList.contains('log-form')) await submitLog(f);
       else if (f.classList.contains('mini-add')) await submitGoalStep(f);
       else if (f.classList.contains('donate-box')) await submitDonate(f);
     } finally {
@@ -767,11 +1077,13 @@
   }
 
   async function submitProfile() {
-    syncDraftName();
+    syncDraft();
     const d = state.draftProfile;
     const name = d.display_name.trim();
     if (!name) return toast('Add a name first', true);
-    const { error } = await sb.from('profiles').update({ display_name: name, emoji: d.emoji, color: d.color, onboarded: true }).eq('id', state.me.id);
+    const row = { display_name: name, emoji: d.emoji, color: d.color, onboarded: true };
+    if (!state.needsMigration) row.mission = d.mission.trim() || null;
+    const { error } = await sb.from('profiles').update(row).eq('id', state.me.id);
     if (error) return fail(error);
     state.sheet = null; state.draftProfile = null;
     toast('Saved'); loadAll();
@@ -780,12 +1092,14 @@
   async function submitTask(f) {
     const title = document.getElementById('t-title').value.trim();
     if (!title) return;
+    const stageEl = document.getElementById('t-stage');
     const row = {
       title,
       due_date: document.getElementById('t-due').value || null,
       goal_id: document.getElementById('t-goal').value || null,
       notes: document.getElementById('t-notes').value.trim() || null,
     };
+    if (stageEl && stageEl.value) row.stage_id = stageEl.value;
     const { error } = await sb.from('tasks').insert(row);
     if (error) return fail(error);
     f.reset(); f.querySelector('details').open = false;
@@ -793,18 +1107,67 @@
   }
 
   async function submitGoal(f) {
-    const title = document.getElementById('g-title').value.trim();
-    if (!title) return;
-    const { error } = await sb.from('goals').insert({ title, target_date: document.getElementById('g-date').value || null });
+    const v = (id) => document.getElementById(id).value.trim();
+    const title = v('g-title');
+    const target = Number(v('g-target'));
+    const start = v('g-start');
+    const end = v('g-date');
+    if (!title || !(target > 0) || !v('g-unit') || !end) return toast('Add a number, what it’s of, and a deadline', true);
+    if (start && end < start) return toast('The deadline is before the start date', true);
+    const { error } = await sb.from('goals').insert({
+      title,
+      metric_target: target,
+      metric_unit: v('g-unit'),
+      start_date: start || todayStr(),
+      target_date: end,
+      stage_id: v('g-stage') || null,
+      description: v('g-why') || null,
+    });
     if (error) return fail(error);
-    f.reset(); toast('Goal added. Now break it into steps.'); loadAll();
+    f.reset(); toast('Goal added. Log progress as you go.'); loadAll();
+  }
+
+  async function submitLog(f) {
+    const id = f.dataset.goal;
+    const amount = Number(document.getElementById(`lg-amt-${id}`).value);
+    if (!amount) return toast('Enter a number to log', true);
+    const note = document.getElementById(`lg-note-${id}`).value.trim();
+    const { error } = await sb.from('goal_logs').insert({ goal_id: id, amount, note: note || null });
+    if (error) return fail(error);
+    f.reset();
+    const g = goalOf(id);
+    if (g && goalCurrent(g) < Number(g.metric_target) && goalCurrent(g) + amount >= Number(g.metric_target)) {
+      confetti(); toast('Target hit. Mark the goal complete when you’re ready.');
+    } else {
+      toast('Logged');
+    }
+    loadAll();
+  }
+
+  async function submitStage(f) {
+    const input = document.getElementById('st-new');
+    const name = input.value.trim();
+    if (!name) return;
+    const stages = stagesOf(state.me.id);
+    const position = stages.length ? Math.max(...stages.map((s) => s.position)) + 1 : 0;
+    const { error } = await sb.from('pipeline_stages').insert({ name, position });
+    if (error) return fail(error);
+    f.reset(); loadAll();
+  }
+
+  async function submitStageRename(f) {
+    const id = f.dataset.id;
+    const name = document.getElementById(`st-name-${id}`).value.trim();
+    if (!name) return;
+    if (await run(sb.from('pipeline_stages').update({ name }).eq('id', id), 'Renamed')) state.editStage = null;
   }
 
   async function submitGoalStep(f) {
     const input = f.querySelector('input');
     const title = input.value.trim();
     if (!title) return;
-    const { error } = await sb.from('tasks').insert({ title, goal_id: f.dataset.goal });
+    const g = goalOf(f.dataset.goal);
+    const { error } = await sb.from('tasks').insert({ title, goal_id: f.dataset.goal, stage_id: (g && g.stage_id) || undefined });
     if (error) return fail(error);
     input.value = ''; loadAll();
   }
@@ -825,8 +1188,15 @@
 
   function readHash() {
     const h = location.hash.slice(1);
-    state.tab = TABS.some((t) => t.id === h) ? h : 'me';
+    if (h.startsWith('chud-')) {
+      state.tab = 'chuds';
+      state.viewing = h.slice(5);
+    } else {
+      state.tab = TABS.some((t) => t.id === h) ? h : h === 'crew' ? 'chuds' : 'me';
+      state.viewing = null;
+    }
     state.openDonate = null;
+    state.editStage = null;
     render();
     window.scrollTo(0, 0);
   }

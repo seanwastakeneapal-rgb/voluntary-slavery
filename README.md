@@ -14,7 +14,7 @@ Costs $0: plain HTML/CSS/JS, Supabase free tier for data and logins, GitHub Page
 
 ### 1. Supabase
 1. Go to supabase.com, sign in, **New project** (free plan). Any name, pick a region close to the crew, save the database password somewhere.
-2. Open **SQL Editor > New query**, paste all of `supabase/schema.sql`, click **Run**. It should say "Success".
+2. Open **SQL Editor > New query**, paste all of `supabase/schema.sql`, click **Run**. It should say "Success". Then do the same with `supabase/002_pipeline_goals.sql` (pipelines, measurable goals, "working on" line).
 3. **Authentication > Sign In / Providers > Email**: turn **off** "Confirm email". (Supabase's free email sender only sends a few emails an hour, so we skip emails completely.)
 4. **Project Settings > API Keys**: copy the **Project URL** and the **anon public** key into `.env` (copy `.env.example` if it doesn't exist), then run `node scripts/make-config.mjs` to write them into `config.js`. `.env` is git-ignored, so keys there never reach GitHub.
 
