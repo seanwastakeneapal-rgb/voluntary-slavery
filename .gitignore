@@ -1,0 +1,4 @@
+# Keys live here, never commit
+.env
+.env.*
+!.env.example
