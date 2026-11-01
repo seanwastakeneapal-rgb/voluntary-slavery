@@ -51,6 +51,7 @@
     openDonate: null, // key of the open "give points" box
     confirmDelete: null,
     editStage: null,
+    goalMode: 'number', // 'number' | 'project'
   };
 
   // ---------- helpers ----------
@@ -128,8 +129,8 @@
   function goalCurrent(g) { return state.logs.filter((l) => l.goal_id === g.id).reduce((a, l) => a + Number(l.amount), 0); }
 
   // Compares progress so far with where you'd be if you went at a steady pace from start to deadline.
-  function pace(g, cur) {
-    const target = Number(g.metric_target);
+  // Projects pass their step count as the target and skip the per-day hint.
+  function pace(g, cur, target = Number(g.metric_target), showNeed = true) {
     if (cur >= target) return { label: 'Hit 🎯', cls: 'good' };
     if (!g.target_date) return null;
     const left = daysUntil(g.target_date);
@@ -139,7 +140,7 @@
     const elapsed = Math.min(total, Math.max(0, (parseDay(todayStr()) - start) / 86400000 + 1));
     const expected = (target * elapsed) / total;
     const perDay = (target - cur) / (left + 1);
-    const need = `Need ${fmtAmount(Math.ceil(perDay * 10) / 10, g.metric_unit)}/day`;
+    const need = showNeed ? `Need ${fmtAmount(Math.ceil(perDay * 10) / 10, g.metric_unit)}/day` : null;
     if (cur >= expected) return { label: 'On track', cls: 'good', need };
     if (cur >= expected * 0.7) return { label: 'Slightly behind', cls: 'today', need };
     return { label: 'Behind', cls: 'overdue', need };
@@ -347,8 +348,8 @@
           <input id="t-title" class="title-input" type="text" maxlength="160" placeholder="What are you getting done?" required aria-label="Task">
           <div class="row">
             <label class="field grow"><span>Due date</span><input id="t-due" type="date"></label>
-            <label class="field grow"><span>Part of a goal</span><select id="t-goal">
-              <option value="">No goal</option>
+            <label class="field grow"><span>Part of a goal or project</span><select id="t-goal">
+              <option value="">None</option>
               ${myGoals.map((g) => `<option value="${g.id}">${esc(g.title)}</option>`).join('')}
             </select></label>
             ${myStages.length ? `<label class="field grow"><span>Pipeline stage</span><select id="t-stage">
@@ -370,14 +371,21 @@
   }
 
   function goalForm(myStages) {
+    const project = state.goalMode === 'project';
     return `<form class="card add-form" id="goal-form">
-      <div class="label">New goal</div>
-      <label class="field"><span>What do you want to achieve?</span>
-        <input id="g-title" type="text" maxlength="120" placeholder="e.g. Send cold outreaches" required></label>
-      <div class="row">
+      <div class="section-head">
+        <div class="label">New goal</div>
+        <div class="seg" role="group" aria-label="Goal kind">
+          <button type="button" data-action="goal-mode" data-mode="number" aria-pressed="${!project}">Hit a number</button>
+          <button type="button" data-action="goal-mode" data-mode="project" aria-pressed="${project}">Finish a project</button>
+        </div>
+      </div>
+      <label class="field"><span>${project ? 'What’s the project?' : 'What do you want to achieve?'}</span>
+        <input id="g-title" type="text" maxlength="120" placeholder="${project ? 'e.g. Build the client nurture server' : 'e.g. Send cold outreaches'}" required></label>
+      ${project ? '<div class="hint" style="color:var(--muted);font-size:var(--step--1)">You’ll break it into steps after adding it. Progress = steps done.</div>' : `<div class="row">
         <label class="field grow"><span>How many?</span><input id="g-target" type="number" min="0.01" step="any" placeholder="100" required></label>
         <label class="field grow"><span>Of what?</span><input id="g-unit" type="text" maxlength="30" placeholder="outreaches, calls, $" required></label>
-      </div>
+      </div>`}
       <div class="row">
         <label class="field grow"><span>Starting</span><input id="g-start" type="date" value="${todayStr()}" required></label>
         <label class="field grow"><span>By when?</span><input id="g-date" type="date" required></label>
@@ -390,7 +398,7 @@
         </select></label>
         <label class="field grow"><span>Why it matters (optional)</span><input id="g-why" type="text" maxlength="200" placeholder="e.g. More calls = more clients"></label>
       </div>
-      <button class="btn ghost" type="submit">Add goal</button>
+      <button class="btn ghost" type="submit">${project ? 'Add project' : 'Add goal'}</button>
     </form>`;
   }
 
@@ -520,21 +528,23 @@
     const pct = measured
       ? Math.min(100, Math.round((cur / Number(g.metric_target)) * 100))
       : (ts.length ? Math.round((stepsDone / ts.length) * 100) : 0);
-    const pc = measured && !g.done ? pace(g, cur) : null;
+    const pc = g.done ? null : measured ? pace(g, cur) : ts.length ? pace(g, stepsDone, ts.length, false) : null;
     const left = g.target_date ? daysUntil(g.target_date) : null;
     const logs = state.logs.filter((l) => l.goal_id === g.id).slice(0, 3);
 
     return `<article class="card goal ${g.done ? 'is-done' : ''}">
       <div class="goal-top">
         <div class="goal-head">
-          <div class="meta">${g.stage_id ? stageChip(g.stage_id) : g.kind === 'personal' ? '<span class="chip">Personal</span>' : '<span class="chip goal">Business</span>'}${pc ? `<span class="chip ${pc.cls}">${pc.label}</span>` : ''}${g.done ? '<span class="chip good">Complete 🏁</span>' : ''}</div>
+          <div class="meta">${g.stage_id ? stageChip(g.stage_id) : g.kind === 'personal' ? '<span class="chip">Personal</span>' : '<span class="chip goal">Business</span>'}${measured ? '' : '<span class="chip">Project</span>'}${pc ? `<span class="chip ${pc.cls}">${pc.label}</span>` : ''}${g.done ? '<span class="chip good">Complete 🏁</span>' : ''}</div>
           <h3>${esc(g.title)}</h3>
         </div>
         ${own ? (confirming
           ? `<button class="btn danger sm" data-action="delete-goal" data-id="${g.id}">Delete goal</button>`
           : `<button class="x-btn" data-action="ask-delete" data-id="${g.id}" aria-label="Delete goal">✕</button>`) : ''}
       </div>
-      ${measured ? `<div class="goal-nums"><b class="num">${fmtAmount(cur, g.metric_unit)}</b><span>of ${fmtAmount(g.metric_target, g.metric_unit)}</span></div>` : ''}
+      ${measured
+        ? `<div class="goal-nums"><b class="num">${fmtAmount(cur, g.metric_unit)}</b><span>of ${fmtAmount(g.metric_target, g.metric_unit)}</span></div>`
+        : `<div class="goal-nums"><b class="num">${stepsDone}/${ts.length}</b><span>${ts.length ? 'steps done' : 'steps. Add the first one below'}</span></div>`}
       <div class="bar" style="--c:${esc(color)}"><i style="width:${g.done ? 100 : pct}%"></i></div>
       <div class="meta">
         ${g.target_date ? `<span>By ${niceDay(g.target_date, { day: 'numeric', month: 'short', year: 'numeric' })}</span>` : ''}
@@ -1015,6 +1025,7 @@
     nudge(el) { run(sb.from('reactions').insert({ task_id: el.dataset.id, kind: 'nudge', emoji: '👉' }), 'Nudge sent'); },
     'toggle-donate'(el) { state.openDonate = state.openDonate === el.dataset.key ? null : el.dataset.key; render(); },
 
+    'goal-mode'(el) { state.goalMode = el.dataset.mode; render(); },
     'board-mode'(el) { state.boardMode = el.dataset.mode; render(); },
     'cal-day'(el) { state.calDay = el.dataset.day; render(); },
     'cal-filter'(el) { state.calFilter = el.dataset.who; render(); },
@@ -1108,17 +1119,19 @@
   }
 
   async function submitGoal(f) {
-    const v = (id) => document.getElementById(id).value.trim();
+    const v = (id) => (document.getElementById(id) || { value: '' }).value.trim();
+    const project = state.goalMode === 'project';
     const title = v('g-title');
     const target = Number(v('g-target'));
     const start = v('g-start');
     const end = v('g-date');
-    if (!title || !(target > 0) || !v('g-unit') || !end) return toast('Add a number, what it’s of, and a deadline', true);
+    if (project && (!title || !end)) return toast('Add the project and a deadline', true);
+    if (!project && (!title || !(target > 0) || !v('g-unit') || !end)) return toast('Add a number, what it’s of, and a deadline', true);
     if (start && end < start) return toast('The deadline is before the start date', true);
     const { error } = await sb.from('goals').insert({
       title,
-      metric_target: target,
-      metric_unit: v('g-unit'),
+      metric_target: project ? null : target,
+      metric_unit: project ? null : v('g-unit'),
       start_date: start || todayStr(),
       target_date: end,
       kind: v('g-stage') === 'personal' ? 'personal' : 'business',
@@ -1126,7 +1139,7 @@
       description: v('g-why') || null,
     });
     if (error) return fail(error);
-    f.reset(); toast('Goal added. Log progress as you go.'); loadAll();
+    f.reset(); toast(project ? 'Project added. Now break it into steps.' : 'Goal added. Log progress as you go.'); loadAll();
   }
 
   async function submitLog(f) {
