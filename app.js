@@ -336,7 +336,7 @@
       </section>`}
 
       <section class="section">
-        <div class="section-head"><h2>Goals</h2><span class="hint">Pipeline or personal</span></div>
+        <div class="section-head"><h2>Goals</h2><span class="hint">Business or personal</span></div>
         <div class="goals">${goals.map((g) => goalCard(g)).join('')}</div>
         ${goalForm(myStages)}
       </section>
@@ -384,8 +384,9 @@
       </div>
       <div class="row">
         <label class="field grow"><span>Type</span><select id="g-stage">
-          <option value="">Personal goal</option>
-          ${myStages.map((s) => `<option value="${s.id}">Pipeline: ${esc(s.name)}</option>`).join('')}
+          <option value="business">Business goal</option>
+          ${myStages.map((s) => `<option value="${s.id}">Business, pipeline: ${esc(s.name)}</option>`).join('')}
+          <option value="personal">Personal goal</option>
         </select></label>
         <label class="field grow"><span>Why it matters (optional)</span><input id="g-why" type="text" maxlength="200" placeholder="e.g. More calls = more clients"></label>
       </div>
@@ -526,7 +527,7 @@
     return `<article class="card goal ${g.done ? 'is-done' : ''}">
       <div class="goal-top">
         <div class="goal-head">
-          <div class="meta">${g.stage_id ? stageChip(g.stage_id) : '<span class="chip">Personal</span>'}${pc ? `<span class="chip ${pc.cls}">${pc.label}</span>` : ''}${g.done ? '<span class="chip good">Complete 🏁</span>' : ''}</div>
+          <div class="meta">${g.stage_id ? stageChip(g.stage_id) : g.kind === 'personal' ? '<span class="chip">Personal</span>' : '<span class="chip goal">Business</span>'}${pc ? `<span class="chip ${pc.cls}">${pc.label}</span>` : ''}${g.done ? '<span class="chip good">Complete 🏁</span>' : ''}</div>
           <h3>${esc(g.title)}</h3>
         </div>
         ${own ? (confirming
@@ -1120,7 +1121,8 @@
       metric_unit: v('g-unit'),
       start_date: start || todayStr(),
       target_date: end,
-      stage_id: v('g-stage') || null,
+      kind: v('g-stage') === 'personal' ? 'personal' : 'business',
+      stage_id: ['business', 'personal', ''].includes(v('g-stage')) ? null : v('g-stage'),
       description: v('g-why') || null,
     });
     if (error) return fail(error);

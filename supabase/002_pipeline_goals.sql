@@ -22,7 +22,8 @@ alter table public.goals
   add column stage_id uuid references public.pipeline_stages on delete set null,
   add column metric_target numeric check (metric_target > 0),
   add column metric_unit text check (char_length(metric_unit) <= 30),
-  add column start_date date not null default current_date;
+  add column start_date date not null default current_date,
+  add column kind text not null default 'business' check (kind in ('business', 'personal'));
 
 alter table public.tasks add column stage_id uuid references public.pipeline_stages on delete set null;
 
